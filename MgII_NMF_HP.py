@@ -170,55 +170,79 @@ def Doublet_MCMC(Doublet,x_spc,y_flx,y_err):
 #Takes spectra info and returns list of doublets that pass snr criteria
 def doublet_finder(continuum,x_spc,y_flx,y_err,min_z):
     
+    #calculate residual
     residual = continuum-y_flx
-    #Generate groups of data with positive residuals
-    #From https://stackoverflow.com/questions/3149440/python-splitting-list-based-on-missing-numbers-in-a-sequence
-    groups = []
-    for k, g in groupby(enumerate(np.where(residual>0)[0]), lambda x: x[0]-x[1]):
-        groups.append(list(map(itemgetter(1), g)))
-    absorb_lines = []
-    
-    for group in groups:
-        #Skip groups of 1 or 2 data vals, these aren't worthwhile peaks and cause an issue in fitting
-        if(len(group) < 3):
-            continue
 
+    #find indices where residuals are positive
+    pos_inds = np.where(residual > 0)[0]
+    #from: https://stackoverflow.com/questions/7352684/how-to-find-the-groups-of-consecutive-elements-in-a-numpy-array, credit user: unutbu
+    cons_groups = np.array(np.split(pos_inds, np.where(np.diff(pos_inds) != 1)[0]+1),dtype=object)
+    #find groups longer than 2 entries
+    minidx_mask = np.array([arr.size > 2 for arr in cons_groups])
+    
+    #check groups of 3 of more indices for snr
+    absorb_lines = []
+    for group in cons_groups[minidx_mask]:
+        #calculate snr
         snr = np.sum(residual[group])/np.sqrt(np.sum(y_err[group]**2))
         
-        #HYPERPARAMETER
-        if(snr>snr_threshold_low):
-            cen = int(np.average(group))
-            #Fit gaussian model
-            model = modeling.models.Gaussian1D(amplitude = np.nanmax(residual[group]),mean = x_spc[group][np.nanargmax(residual[group])],stddev = 0.4)
-            fm = fitter(model = model, x = x_spc[group], y = residual[group])
-            #determine redshift by model params
+        #set central index to be the highest value
+        cen = np.nanargmax(residual[group])
+        
+        #skip entries with implied redshifts below min_Z
+        #could run this earlier but here seems fine
+        if x_spc[group][cen]/first_line_wave - 1 < min_z:
+            continue
+        
+        if snr > snr_threshold_low:
+            try:
+                model = modeling.models.Gaussian1D(amplitude = np.nanmax(residual[group]), mean = x_spc[group][cen], stddev = 0.4)
+                fm = fitter(model, x = x_spc[group], y = residual[group])
+            except:
+                print(model,group)
             
+            #save the line parameters as well as group of indices, snr and central index
             absorb_lines.append([fm.parameters[1],group,snr,fm.parameters[0],fm.parameters[2],cen])
+    #convert to np array
+    absorb_lines = np.array(absorb_lines,dtype=object)
+
+    #calculate what implied redshift would be if each feature was first/second line of MgII doublet
+    firstline_z = absorb_lines[:,0]/first_line_wave - 1
+    secondline_z = absorb_lines[:,0]/second_line_wave -1
     
+    #calculate the allowed redshift difference implied by the restframe seperation, restframe error margain and firstline redshift
+    z_diff = ((1+firstline_z)*(first_line_wave+rf_line_sep+rf_err_margain))/second_line_wave - 1 - firstline_z
+
+    #comparing each firstline to it's corresponding second line (note slicing) we can check if below redshift difference
+    doublet_loc = np.where(secondline_z[1:]-firstline_z[:-1] < z_diff[:-1])[0]
     
+    #save a doublet for each case where redshift difference is acceptable and snr thresholds are met
     doublets = []
-    #This is super poorly optimized, but just not too much of a slowdown
-    #should only look at line2s at higher wavelength than line1
-    for line1 in absorb_lines:
-        z = line1[0]/first_line_wave-1
-        line_sep = rf_line_sep*(1+z)
-        err_margain = rf_err_margain*(1+z)
+    for loc in doublet_loc:
         
+        line1 = absorb_lines[loc]
+        line2 = absorb_lines[loc+1]
         
-        for line2 in absorb_lines:
-            #if wavelength range is good, redshift is past LyA and one of the line snrs is above snr_threshold_high
-            if(line1[0]+line_sep-err_margain<line2[0]<line1[0]+line_sep+err_margain and z>min_z and line1[2]>snr_threshold_high):
-                #pass along the redshift of first line, center value of first line, snr of both lines, amplitude and std-dev of both lines
-                doublets.append([z,line1[5],line1[2],line2[2],line1[3],line1[4],line2[3],line2[4]])
-    return doublets
+        #check if leading line (2796) meets high snr threshold
+        if line1[2] > snr_threshold_high:
+            #append the redshift, center index, snrs and initial line amplitudes and widths
+            doublets.append([firstline_z[loc],line1[5],line1[2],line2[2],line1[3],line1[4],line2[3],line2[4]])
+        
+    return np.array(doublets)
 
 def Doublet_Detection(cat_subset,hp):
     hp_str = str(hp)
+    
+    if int(hp) < 100:
+        hp_short = '0'
+    else:
+        hp_short = hp_str[0:-2]
 
     surveys = np.unique(cat_subset['SURVEY'])
 
     #format output directory and filename
-    out_dir = '{}/{}/{}'.format(out_base_dir,hp_str[0:-2],hp_str)
+    out_dir = '{}/{}/{}'.format(out_base_dir,hp_short,hp_str)
+    print(out_dir)
     out_fn = 'MgII-Abs-Chains-{}.hdf5'.format(hp_str)
     #names of model params for h5py formatting
     names = ['z','Amp1','Amp2','StdDev1','StdDev2']
@@ -234,26 +258,34 @@ def Doublet_Detection(cat_subset,hp):
     with h5py.File(out_file, "w") as f:
         for survey in surveys:
             #format coadd directory and filename
-            in_dir = os.path.join(reduction_base_dir, "healpix",survey,"dark",hp_str[0:-2],hp_str)
+            in_dir = os.path.join(reduction_base_dir, "healpix",survey,"dark",hp_short,hp_str)
             in_fn = "coadd-{}-{}-{}.fits".format(survey, "dark", hp)
 
             #read in specobj file, and also coadd
             specfile = os.path.join(in_dir, in_fn)
+            #print(specfile)
             specobj = desispec.io.read_spectra(specfile)
             coadd_specobj = coadd_cameras(specobj)
 
             #grab wavelength grid as this will be same for all spectra
             x_spc = coadd_specobj.wave["brz"]
+            
+            cat_srv_sub = cat_subset[cat_subset['SURVEY']==survey]
 
             #find indices of specobj that have a targetid value in the catalog subset
             #i.e. find the indices of the QSO_cat entries in the specobj
-            QSO_inds = np.where(np.isin(specobj.target_ids(),cat_subset['TARGETID'])==True)[0]
+            #QSO_inds = np.where(np.isin(specobj.target_ids(),cat_subset['TARGETID'])==True)[0]
 
             #iterate over qso indices and the related shift from catalog subset
             #little opaque here but clean
-            for ind,redshift in zip(QSO_inds,cat_subset['Z']):
-                #pull targetid
-                TARGETID = specobj.target_ids()[ind]
+            for entry in cat_srv_sub:
+                
+                redshift = entry['Z']
+                TARGETID = entry['TARGETID']
+                
+                #have to pull out from inside listed list
+                ind = np.where(specobj.target_ids() == TARGETID)[0][0]
+ 
 
                 #calculate wavelength of MgII abs at Lya emission (we don't search this region)
                 min_z = (1216*(1+redshift)/first_line_wave)-1
@@ -334,17 +366,49 @@ redux = str(sys.argv[1])
 reduction_base_dir = '/global/cfs/cdirs/desi/spectro/redux/{}/'.format(redux)
 
 #open catalog
-QSOcat_fp = '/global/cfs/cdirs/desi/users/edmondc/QSO_catalog/{}/QSO_cat_{}_healpix_only_qso_targets.fits'.format(redux,redux)
-QSOcat = fitsio.read(QSOcat_fp,'QSO_CAT')
+if redux == 'fuji' or redux == 'guadalupe':
+    out_base_dir = '/pscratch/sd/l/lucasnap/MgII_Abs_Chains/{}-NMF'.format(redux)
+    
+    QSOcat_fp = '/global/cfs/cdirs/desi/users/edmondc/QSO_catalog/{}/QSO_cat_{}_healpix_only_qso_targets.fits'.format(redux,redux)
+    QSOcat = fitsio.read(QSOcat_fp,'QSO_CAT')
+    #restrict to only dark time exposures
+    QSOcat = QSOcat[QSOcat['PROGRAM'] == 'dark']
+    
+elif redux == 'iron':
+    out_base_dir = '/pscratch/sd/l/lucasnap/MgII_Abs_Chains/{}-NMF'.format(redux)
+    
+    QSOcat_fp = '/global/cfs/cdirs/desi/survey/catalogs/Y1/QSO/{}/QSO_cat_{}_main_dark_healpix_only_qso_targets_vtest.fits'.format(redux,redux)
+    QSOcat = fitsio.read(QSOcat_fp,'QSO_CAT')
+    #restrict to only dark time exposures
+    QSOcat = QSOcat[QSOcat['PROGRAM'] == 'dark']
 
-#restrict to only dark time exposures (??)
-QSOcat = QSOcat[QSOcat['PROGRAM'] == 'dark']
+elif redux == 'fuji_all':
+    redux = 'fuji'
+    reduction_base_dir = '/global/cfs/cdirs/desi/spectro/redux/{}/'.format(redux)
+    out_base_dir = '/pscratch/sd/l/lucasnap/MgII_Abs_Chains/{}-ALL'.format(redux)
+    
+    QSOcat_all_fp = '/global/cfs/cdirs/desi/users/edmondc/QSO_catalog/{}/QSO_cat_{}_healpix.fits'.format(redux,redux)
+    QSOcat_all = fitsio.read(QSOcat_all_fp,'QSO_CAT')
+    #restrict to only dark time exposures
+    QSOcat_all = QSOcat_all[QSOcat_all['PROGRAM'] == 'dark']
+    
+    QSOcat_qso_fp = '/global/cfs/cdirs/desi/users/edmondc/QSO_catalog/{}/QSO_cat_{}_healpix_only_qso_targets.fits'.format(redux,redux)
+    QSOcat_qso = fitsio.read(QSOcat_qso_fp,'QSO_CAT')
+    QSOcat_qso = QSOcat_qso[QSOcat_qso['PROGRAM'] == 'dark']
+    
+    print('Initial all catalog length: {}'.format(len(QSOcat_all)))
+    print('Initial qso catalog length: {}'.format(len(QSOcat_qso)))
+    
+    #match_TID,all_idx,qso_idx = np.intersect1d(QSOcat_all['TARGETID'],QSOcat_qso['TARGETID'],return_indices=True)
+    all_both_mask = np.isin(QSOcat_all['TARGETID'],QSOcat_qso['TARGETID'])
+    
+    QSOcat = QSOcat_all[~all_both_mask]
+    
+    print('After removing qso target entries {} entries remain in catalog'.format(len(QSOcat)))
 
 #create list of unique healpix values
 hp_vals = radec2pix(64,QSOcat['TARGET_RA'],QSOcat['TARGET_DEC'])
 hp_unique = np.unique(hp_vals)
-
-out_base_dir = '/pscratch/sd/l/lucasnap/MgII_Abs_Chains/{}-NMF'.format(redux)
 
 #routine to check if hp values have been completed
 #make a mask of healpix directories that have/have not been succesfully complete    
@@ -353,9 +417,14 @@ hp_complete_mask = []
 for hp_val in hp_unique:
     #recast as str
     hp_str = str(hp_val)
+    
+    if int(hp_val) < 100:
+        hp_short = 0
+    else:
+        hp_short = hp_str[0:-2]
 
     #format filepath to MgII output
-    out_dir = '{}/{}/{}'.format(out_base_dir,hp_str[0:-2],hp_str)
+    out_dir = '{}/{}/{}'.format(out_base_dir,hp_short,hp_str)
     h5_fn = 'MgII-Abs-Chains-{}.hdf5'.format(hp_str)
     h5_fp = os.path.join(out_dir,h5_fn)
 
@@ -381,7 +450,7 @@ print(len(hp_incomplete))
 #take percentage of hp_incomplete corresponding to passed argv
 #currently defeaults to 10 percent interval
 if(len(sys.argv)==4):
-    hp_incomplete = hp_incomplete[int(len(hp_incomplete)*int(sys.argv[3])/100):int(len(hp_incomplete)*(int(sys.argv[3])/100+0.5))]
+    hp_incomplete = hp_incomplete[int(len(hp_incomplete)*int(sys.argv[3])/100):int(len(hp_incomplete)*(int(sys.argv[3])/100+0.25))]
 
 print(len(hp_incomplete))
 print('Running MgII Absorption Finder on healpix directories: {}.'.format(hp_incomplete))
