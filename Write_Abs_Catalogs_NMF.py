@@ -25,7 +25,7 @@ med_filt_size = 85
 #Example chains_fps
 #'/pscratch/sd/l/lucasnap/MgII_Abs_Chains/fuji-NMF'
 #'/global/cscratch1/sd/lucasnap/SiIV_Abs_Chains'
-
+#['', 'pscratch', 'sd', 'l', 'lucasnap', 'MgII_Abs_Chains', 'loa']
 #file path setup for SiIV chains
 chains_fp = str(sys.argv[1])
 
@@ -35,6 +35,9 @@ chain_spt = chains_fp.split('/')
 redux = chain_spt[-1].split('-')[0]
 
 which_line = chain_spt[-2].split('_')[0]
+
+print(chain_spt)
+print(which_line)
 
 if which_line == 'MgII':
     first_line_wave = 2796.3543
@@ -72,7 +75,7 @@ if(redux == 'fuji'):
     zcat_dic = {'sv1':sv1_zcat,'sv2':sv2_zcat,'sv3':sv3_zcat}
     
 else:
-    main_zcat = fitsio.read('{}/zpix-{}-dark.fits'.format(summary_cat_dir,'main'),'ZCATALOG')
+    main_zcat = fitsio.read('{}/v1/zpix-{}-dark.fits'.format(summary_cat_dir,'main'),'ZCATALOG')
     
     zcat_dic = {'main':main_zcat}
 
@@ -82,6 +85,8 @@ if redux == 'fuji' or redux == 'guadalupe':
     QSOcat_fp = '/global/cfs/cdirs/desi/users/edmondc/QSO_catalog/{}/QSO_cat_{}_healpix_only_qso_targets.fits'.format(redux,redux)
 elif redux == 'iron':
     QSOcat_fp = '/global/cfs/cdirs/desi/survey/catalogs/Y1/QSO/{}/QSO_cat_{}_main_dark_healpix_only_qso_targets_vtest.fits'.format(redux,redux)
+elif redux == 'loa':
+    QSOcat_fp = '/global/cfs/cdirs/desi/survey/catalogs/DA2/QSO/loa/QSO_cat_loa_main_dark_healpix_only_qso_targets_v2.fits'
 QSOcat = fitsio.read(QSOcat_fp,'QSO_CAT')
 
 

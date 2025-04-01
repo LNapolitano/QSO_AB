@@ -21,7 +21,7 @@ min_tol = 100
 nwalkers = 32
 ndim = 5 #not really a hyper
 chain_length = 15000
-chain_discard = 1000
+chain_discard = 3000
 #----------------------------------------------------
 
 #multiprocessing seteup
@@ -113,7 +113,9 @@ def Doublet_MCMC(Doublet,x_spc,y_flx,y_err):
     #determine redshift and appropriate line_sep
     z = float(Doublet[0])
     line_sep = rf_line_sep*(1+z)
-    peak = int(Doublet[1])
+    
+    #new definition of peak (i.e. center of search region)
+    peak = np.argmin(np.abs(x_spc - first_line_wave*(1+z)))
 
     #set sub region values, bounded by [0,x_spc-1]
     srh = min(len(x_spc)-1,peak+sub_region_size)
@@ -139,10 +141,14 @@ def Doublet_MCMC(Doublet,x_spc,y_flx,y_err):
 
     #could widen this inital guess range, don't think it matters though
     p0 = initial + 1e-4 * np.random.randn(nwalkers, ndim)
+    
+    #print(z,z_low,z_high)
+    #print(reg_wave,reg_flx,reg_err,z_low,z_high)
 
     #setup sampler with args
     sampler = emcee.EnsembleSampler(nwalkers, ndim, log_probability, args = [reg_wave,reg_flx,reg_err,z_low,z_high])
 
+    #print(p0)
     #burn-in
     state = sampler.run_mcmc(p0, 100)
     sampler.reset()
@@ -150,13 +156,16 @@ def Doublet_MCMC(Doublet,x_spc,y_flx,y_err):
     #MCMC can hit errors during running, so wrap in try/except
     try:
         state = sampler.run_mcmc(state,chain_length)
-    except ValueError:
+    except Exception as e:
+        print(e)
         return
     
     #extract estimate autocorrelation time, number of times chain is longer than autocorr time and mean_accept_frac
     tau = sampler.get_autocorr_time(discard = chain_discard,quiet = True)
     implied_tol = chain_length/max(tau)
     mean_accept_frac = np.mean(sampler.acceptance_fraction)
+    
+    #print('MCMC fit TOL = {}, MAF = {}'.format(implied_tol,mean_accept_frac))
     
     
     #mcmc quality cuts, if passed return the samples
@@ -199,7 +208,7 @@ def doublet_finder(continuum,x_spc,y_flx,y_err,min_z):
                 model = modeling.models.Gaussian1D(amplitude = np.nanmax(residual[group]), mean = x_spc[group][cen], stddev = 0.4)
                 fm = fitter(model, x = x_spc[group], y = residual[group])
             except:
-                print(model,group)
+                print('1D Gaussian Error',model,group)
             
             #save the line parameters as well as group of indices, snr and central index
             absorb_lines.append([fm.parameters[1],group,snr,fm.parameters[0],fm.parameters[2],cen])
@@ -242,7 +251,7 @@ def Doublet_Detection(cat_subset,hp):
 
     #format output directory and filename
     out_dir = '{}/{}/{}'.format(out_base_dir,hp_short,hp_str)
-    print(out_dir)
+    print('Output Directory:',out_dir)
     out_fn = 'MgII-Abs-Chains-{}.hdf5'.format(hp_str)
     #names of model params for h5py formatting
     names = ['z','Amp1','Amp2','StdDev1','StdDev2']
@@ -266,6 +275,8 @@ def Doublet_Detection(cat_subset,hp):
             #print(specfile)
             specobj = desispec.io.read_spectra(specfile)
             coadd_specobj = coadd_cameras(specobj)
+            
+            print('Running healpixel: {} with {} QSO catalog entries'.format(hp_str,coadd_specobj.num_spectra()))
 
             #grab wavelength grid as this will be same for all spectra
             x_spc = coadd_specobj.wave["brz"]
@@ -305,6 +316,8 @@ def Doublet_Detection(cat_subset,hp):
                 doublet_cont = c_tight*(1-np.arange(f_scale )/f_scale) + c_wide*(np.arange(f_scale )/f_scale)
                 #run doublet finder
                 doublets = doublet_finder(doublet_cont,x_spc,smooth_yflx,y_err,min_z)
+                
+                #print(doublets)
 
                 #NEW code for NMF/medfilt continuum conditions
                 NMF_fail = False
@@ -312,7 +325,8 @@ def Doublet_Detection(cat_subset,hp):
                 #using NMF estimator, will sometimes fail so t/e wrapped. If it fails we want to try medfilt continuum so set bool
                 try:
                     out = NMF.NMF_normalization_v2(np.log10(x_spc),y_flx,coadd_specobj.ivar["brz"][ind],redshift,NMF_basis)
-                except:
+                except Exception as e:
+                    print(e)
                     NMF_fail = True
                 
                 #if NMF failed, always use medfilt continuum
@@ -357,6 +371,7 @@ def Doublet_Detection(cat_subset,hp):
                             grp = f.create_group(out_str)
                         except ValueError as e:
                             #if group already exists then this MgII feature is already recorded, move to next entry
+                            print('Error in storing h5py',e)
                             continue
                         for k in range(ndim):
                             grp.create_dataset(names[k],dtype = float,data = chain[:,k])
@@ -405,6 +420,17 @@ elif redux == 'fuji_all':
     QSOcat = QSOcat_all[~all_both_mask]
     
     print('After removing qso target entries {} entries remain in catalog'.format(len(QSOcat)))
+    
+elif redux == 'loa':
+    reduction_base_dir = '/global/cfs/cdirs/desi/spectro/redux/{}/'.format(redux)
+    out_base_dir = '/pscratch/sd/l/lucasnap/MgII_Abs_Chains/{}'.format(redux)
+    
+    QSOcat_fp = '/global/cfs/cdirs/desi/survey/catalogs/DA2/QSO/loa/QSO_cat_loa_main_dark_healpix_only_qso_targets_v2.fits'
+    QSOcat = fitsio.read(QSOcat_fp,'QSO_CAT')
+    #restrict to only dark time exposures
+    QSOcat = QSOcat[QSOcat['PROGRAM'] == 'dark']
+    
+    print('{} entries in input QSO Catalog'.format(QSOcat.size))
 
 #create list of unique healpix values
 hp_vals = radec2pix(64,QSOcat['TARGET_RA'],QSOcat['TARGET_DEC'])
@@ -444,15 +470,15 @@ hp_complete_mask = np.asarray(hp_complete_mask)
 
 #find subset of incomplete hp_dirs
 hp_incomplete = hp_unique[~hp_complete_mask]
-print(len(hp_unique))
-print(len(hp_incomplete))
+print('{} total healpixels in release'.format(len(hp_unique)))
+print('{} incomplete healpixels in release'.format(len(hp_incomplete)))
 
 #take percentage of hp_incomplete corresponding to passed argv
 #currently defeaults to 10 percent interval
 if(len(sys.argv)==4):
     hp_incomplete = hp_incomplete[int(len(hp_incomplete)*int(sys.argv[3])/100):int(len(hp_incomplete)*(int(sys.argv[3])/100+0.25))]
+    print('{} incomplete healpixels in release after applying percentage cut'.format(len(hp_incomplete)))
 
-print(len(hp_incomplete))
 print('Running MgII Absorption Finder on healpix directories: {}.'.format(hp_incomplete))
 
 #If there are no incomplete directories, survey is complete. Exit
